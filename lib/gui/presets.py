@@ -42,6 +42,9 @@ class PresetsPanel(wx.Panel):
             def get_preset_suite_name(self):
                 Return a string used in the presets filename, e.g. "lettering" -> "lettering_presets.json".
                 If not defined, "presets.json" will be used.
+
+            def get_builtin_presets(self):
+                Optional.  Return a dict of read-only presets that are always available.
         """
 
         kwargs.setdefault('style', wx.BORDER_NONE)
@@ -101,11 +104,26 @@ class PresetsPanel(wx.Panel):
         with open(self.presets_path(), 'w') as presets_file:
             json.dump(presets, presets_file)
 
+    @property
+    @cache
+    def builtin_presets(self):
+        try:
+            return self.parent.get_builtin_presets()
+        except AttributeError:
+            return {}
+
+    def is_builtin(self, preset_name):
+        if preset_name in self.builtin_presets:
+            info_dialog(self, _('"%s" is a built-in preset and cannot be changed or deleted. '
+                                'Please use another name.') % preset_name, caption=_('Preset'))
+            return True
+        return False
+
     def update_preset_list(self):
         current_preset = self.preset_chooser.GetValue().strip()
-        preset_names = list(self._load_presets().keys())
+        preset_names = list(self.builtin_presets.keys()) + list(self._load_presets().keys())
         preset_names = [preset for preset in preset_names if not self.is_hidden(preset)]
-        self.preset_chooser.SetItems(sorted(preset_names))
+        self.preset_chooser.SetItems(sorted(set(preset_names)))
         if current_preset in preset_names:
             self.preset_chooser.SetValue(current_preset)
 
@@ -121,7 +139,7 @@ class PresetsPanel(wx.Panel):
             return
 
     def check_and_load_preset(self, preset_name):
-        preset = self._load_presets().get(preset_name)
+        preset = self.builtin_presets.get(preset_name) or self._load_presets().get(preset_name)
         if not preset:
             info_dialog(self, _('Preset "%s" not found.') % preset_name, caption=_('Preset'))
 
@@ -135,7 +153,7 @@ class PresetsPanel(wx.Panel):
 
     def add_preset(self, event, overwrite=False):
         preset_name = self.get_preset_name()
-        if not preset_name:
+        if not preset_name or self.is_builtin(preset_name):
             return
 
         if not overwrite and preset_name in self._load_presets():
@@ -172,7 +190,7 @@ class PresetsPanel(wx.Panel):
 
     def delete_preset(self, event):
         preset_name = self.get_preset_name()
-        if not preset_name:
+        if not preset_name or self.is_builtin(preset_name):
             return
 
         preset = self.check_and_load_preset(preset_name)

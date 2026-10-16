@@ -16,6 +16,8 @@ DEFAULT_SETTINGS = {
     # Ink/Stitch preferences
     "cache_size": 100,
     "pop_out_simulator": False,
+    # params dialog: False shows only the essential settings
+    "params_show_all": False,
     # simulator
     "simulator_adaptive_speed": True,
     "simulator_speed": 16,
