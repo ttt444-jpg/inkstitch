@@ -844,6 +844,7 @@ class Params(InkstitchExtension):
     def __init__(self, *args, **kwargs):
         self.cancelled = False
         self.fill_method_suggestions = defaultdict(list)
+        self.line_like_shapes = {}
         InkstitchExtension.__init__(self, *args, **kwargs)
 
     def embroidery_classes(self, node):
@@ -888,14 +889,31 @@ class Params(InkstitchExtension):
         except Exception:
             debug.log(format_uncaught_exception())
             return element
+        if method is None:
+            # keyed by node: get_nodes_by_class() runs more than once
+            self.line_like_shapes[element.node.get_id()] = reason
+            return element
         element.set_param('fill_method', method)
         self.fill_method_suggestions[method].append(reason)
         # set_param invalidates the element's caches
         return FillStitch(element.node)
 
     def fill_method_info(self):
-        if not self.fill_method_suggestions:
-            return None
+        info = []
+        if self.line_like_shapes:
+            menu = "Extensions > Ink/Stitch > Tools: Stroke > Fill to Stroke"
+            if len(self.line_like_shapes) == 1:
+                reason = next(iter(self.line_like_shapes.values()))
+                info.append(_("This shape %(reason)s. Fill stitches won't look good on it. "
+                              "Convert it to a line with %(menu)s.") % {'reason': reason, 'menu': menu})
+            else:
+                info.append(_("%(count)d shapes look like drawn lines. Fill stitches won't look good on them. "
+                              "Convert them to lines with %(menu)s.") % {'count': len(self.line_like_shapes), 'menu': menu})
+        if self.fill_method_suggestions:
+            info.append(self.fill_method_suggestion_text())
+        return "\n\n".join(info) or None
+
+    def fill_method_suggestion_text(self):
         names = {option.id: option.name for option in FillStitch._fill_methods}
         parts = []
         for method, reasons in self.fill_method_suggestions.items():
