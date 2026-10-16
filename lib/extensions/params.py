@@ -29,9 +29,29 @@ from ..svg import PIXELS_PER_MM
 from ..svg.tags import EMBROIDERABLE_TAGS
 from ..utils import get_resource_dir
 from ..utils.param import ParamOption
+from ..utils.settings import global_settings
 from ..utils.svg_data import get_pagecolor
 from ..utils.threading import ExitThread, check_stop_flag
 from .base import InkstitchExtension
+
+
+# Params shown when "Show all settings" is off.  Toggles (e.g. underlay on/off)
+# are always shown.  Hidden params keep their values; they are just not displayed.
+ESSENTIAL_PARAMS = frozenset([
+    # fill
+    'fill_method', 'angle', 'row_spacing_mm', 'max_stitch_length_mm',
+    'meander_pattern', 'meander_scale_percent', 'contour_strategy',
+    'pull_compensation_mm',
+    # stroke
+    'stroke_method', 'repeats', 'bean_stitch_repeats', 'running_stitch_length_mm',
+    'zigzag_spacing_mm',
+    # satin
+    'satin_method',
+    # clone
+    'clone', 'flip_angle',
+    # common
+    'trim_after', 'stop_after',
+])
 
 
 def grouper(iterable_obj, count, fillvalue=None):
@@ -61,6 +81,8 @@ class ParamsTab(ScrolledPanel):
         self.paired_tab = None
         self.disable_notify_pair = False
         self.on_change_hook = None
+        self.param_widgets = {}
+        self.simple_hidden_widgets = set()
 
         toggles = [param for param in self.params if param.type == 'toggle']
 
@@ -219,7 +241,7 @@ class ParamsTab(ScrolledPanel):
 
         for name, input in self.param_name_to_input.items():
             if input in self.changed_inputs and input != self.toggle_checkbox:
-                if input.IsEnabled() and input.IsShown():
+                if input.IsEnabled() and self.is_input_active(name, input):
                     # there are two types of combo boxes:
                     # 1. multiple values for the same param on selected elements - 2. param type
                     # multiple values will be handled with the GetValue() method
@@ -394,10 +416,8 @@ class ParamsTab(ScrolledPanel):
                     widget.Hide()
 
             for widgets in grouper(self.choice_widgets[choice_tuple], 4):
-                widgets[0].Show(True)
-                widgets[1].Show(True)
-                widgets[2].Show(True)
-                widgets[3].Show(True)
+                for widget in widgets:
+                    widget.Show(widget not in self.simple_hidden_widgets)
             choice["last_initialized_choice"] = current_selection
 
     def update_enable_widgets(self, event=None):
@@ -524,6 +544,7 @@ class ParamsTab(ScrolledPanel):
 
             self.settings_grid.Add(input, flag=wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.EXPAND, border=10)
             self.settings_grid.Add(col4, flag=wx.ALIGN_CENTER_VERTICAL)
+            self.param_widgets[param.name] = [col1, description, input, col4]
 
         self.input_to_param_name.update({v: k for k, v in self.param_name_to_input.items()})
 
@@ -534,6 +555,47 @@ class ParamsTab(ScrolledPanel):
         self.SetMinSize((box.CalcMin()[0], 200))
 
         self.Layout()
+
+    def is_input_active(self, param_name, input):
+        if input.IsShown():
+            return True
+        # Hidden only because of simple mode: still save it if it belongs to the current choice
+        return input in self.simple_hidden_widgets and self.is_choice_active(self.param_name_to_param[param_name])
+
+    def is_choice_active(self, param):
+        if param.select_items is None:
+            return True
+        for choice_name, value in param.select_items:
+            choice = self.dict_of_choices.get(choice_name)
+            if choice is None:
+                continue
+            widget = choice["widget"]
+            if choice["param"].type == "combo":
+                current = widget.GetClientData(widget.GetSelection()).id
+            else:
+                current = widget.GetSelection()
+            if current == value:
+                return True
+        return False
+
+    def set_simple_mode(self, simple):
+        self.simple_hidden_widgets = set()
+        if simple:
+            for param in self.params:
+                if param.name not in ESSENTIAL_PARAMS:
+                    self.simple_hidden_widgets.update(self.param_widgets[param.name])
+
+        for param in self.params:
+            for widget in self.param_widgets[param.name]:
+                if param.select_items is None:
+                    widget.Show(widget not in self.simple_hidden_widgets)
+                else:
+                    # update_choice_widgets() re-shows the ones matching the current choice
+                    widget.Hide()
+        self.update_choice_widgets()
+
+        self.Layout()
+        self.SetupScrolling(scrollToTop=False)
 
     def create_change_indicator(self, param_name):
         indicator = wx.Button(self, style=wx.BORDER_NONE |
@@ -588,8 +650,25 @@ class SettingsPanel(wx.Panel):
         self.apply_button = wx.Button(self, wx.ID_ANY, _("Apply and Quit"))
         self.apply_button.Bind(wx.EVT_BUTTON, self.apply)
 
+        self.show_all_checkbox = wx.CheckBox(self, wx.ID_ANY, _("Show all settings"))
+        self.show_all_checkbox.SetToolTip(_("Off: only show the most commonly used settings. "
+                                            "Hidden settings keep their values."))
+        self.show_all_checkbox.SetValue(global_settings['params_show_all'])
+        self.show_all_checkbox.Bind(wx.EVT_CHECKBOX, self.on_show_all)
+        self.set_simple_mode(not global_settings['params_show_all'])
+
         self.__do_layout()
         self.update_preview()
+
+    def set_simple_mode(self, simple):
+        for tab in self.tabs:
+            tab.set_simple_mode(simple)
+
+    def on_show_all(self, event):
+        show_all = self.show_all_checkbox.GetValue()
+        global_settings['params_show_all'] = show_all
+        self.set_simple_mode(not show_all)
+        self.Layout()
 
     def update_preview(self, tab=None):
         self.simulator.stop()
@@ -664,13 +743,42 @@ class SettingsPanel(wx.Panel):
 
         return preset
 
+    def get_builtin_presets(self):
+        # called by self.presets_panel
+        # Starting points for 4x4" home embroidery machines like the Brother F440E.
+        # Keys are tab names, values are param values as the dialog inputs expect them.
+        min_stitch = {'min_stitch_length_mm': '0.3'}
+        return {
+            _("Brother F440E (built-in)"): {
+                _("FillStitch"): {
+                    'max_stitch_length_mm': '3.5',
+                    'running_stitch_length_mm': '2.5',
+                    'pull_compensation_mm': '0.2',
+                    **min_stitch,
+                },
+                _("Fill Underlay"): {'fill_underlay': True},
+                _("Satin Column"): {
+                    'zigzag_spacing_mm': '0.4',
+                    'pull_compensation_mm': '0.2',
+                    'max_stitch_length_mm': '7',
+                    **min_stitch,
+                },
+                _("Contour Underlay"): {'contour_underlay': True},
+                _("Zig-zag Underlay"): {'zigzag_underlay': True},
+                _("Stroke"): {
+                    'running_stitch_length_mm': '2.5',
+                    **min_stitch,
+                },
+            }
+        }
+
     def apply_preset_data(self, preset_data):
         # called by self.presets_panel
 
         for tab in self.tabs:
             tab.load_preset(preset_data)
 
-        self.preview_renderer.update()
+        self.update_preview()
 
     def _apply(self):
         for tab in self.tabs:
@@ -699,6 +807,8 @@ class SettingsPanel(wx.Panel):
         sizer_1 = wx.BoxSizer(wx.VERTICAL)
         # self.sizer_3_staticbox.Lower()
         sizer_3 = wx.BoxSizer(wx.HORIZONTAL)
+        sizer_3.Add(self.show_all_checkbox, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.BOTTOM, 10)
+        sizer_3.AddStretchSpacer(1)
         for tab in self.tabs:
             self.notebook.AddPage(tab, tab.name)
         sizer_1.Add(self.warning_panel, 0, flag=wx.EXPAND | wx.ALL, border=10)
@@ -708,7 +818,7 @@ class SettingsPanel(wx.Panel):
         sizer_3.Add(self.cancel_button, 0, wx.RIGHT, 5)
         sizer_3.Add(self.use_last_button, 0, wx.RIGHT | wx.BOTTOM, 5)
         sizer_3.Add(self.apply_button, 0, wx.RIGHT | wx.BOTTOM, 5)
-        sizer_1.Add(sizer_3, 0, wx.ALIGN_RIGHT, 0)
+        sizer_1.Add(sizer_3, 0, wx.EXPAND, 0)
         self.SetSizer(sizer_1)
         sizer_1.Fit(self)
 
