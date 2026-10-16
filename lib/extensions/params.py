@@ -20,13 +20,14 @@ from ..debug.debug import debug
 from ..elements import (Clone, EmbroideryElement, FillStitch, SatinColumn,
                         Stroke, nodes_to_elements)
 from ..elements.clone import is_clone
+from ..elements.utils.fill_method import suggest_fill_method
 from ..exceptions import InkstitchException, format_uncaught_exception
 from ..gui import PresetsPanel, WarningPanel
 from ..gui.simulator import SplitSimulatorWindow
 from ..i18n import _
 from ..stitch_plan import stitch_groups_to_stitch_plan
 from ..svg import PIXELS_PER_MM
-from ..svg.tags import EMBROIDERABLE_TAGS
+from ..svg.tags import EMBROIDERABLE_TAGS, INKSTITCH_ATTRIBS
 from ..utils import get_resource_dir
 from ..utils.param import ParamOption
 from ..utils.settings import global_settings
@@ -63,6 +64,7 @@ class ParamsTab(ScrolledPanel):
     def __init__(self, *args, **kwargs):
         self.params = kwargs.pop('params', [])
         self.name = kwargs.pop('name', None)
+        self.info = kwargs.pop('info', None)
 
         # TODO: this is actually a list of embroidery elements, not DOM nodes, and needs to be renamed
         self.nodes = kwargs.pop('nodes')
@@ -457,6 +459,11 @@ class ParamsTab(ScrolledPanel):
         sizer.Add(self.description, proportion=0, flag=wx.EXPAND | wx.ALL, border=5)
         box.Add(sizer, proportion=0, flag=wx.ALL, border=5)
 
+        if self.info:
+            info = wx.StaticText(self, label=self.info)
+            info.Wrap(400)
+            box.Add(info, proportion=0, flag=wx.LEFT | wx.RIGHT | wx.BOTTOM, border=10)
+
         if self.toggle:
             toggle_sizer = wx.BoxSizer(wx.HORIZONTAL)
             toggle_sizer.Add(self.create_change_indicator(
@@ -836,6 +843,7 @@ class NoValidObjects(Exception):
 class Params(InkstitchExtension):
     def __init__(self, *args, **kwargs):
         self.cancelled = False
+        self.fill_method_suggestions = defaultdict(list)
         InkstitchExtension.__init__(self, *args, **kwargs)
 
     def embroidery_classes(self, node):
@@ -865,10 +873,37 @@ class Params(InkstitchExtension):
         for z, node in enumerate(nodes):
             for cls in self.embroidery_classes(node):
                 element = cls(node)
+                if cls is FillStitch and INKSTITCH_ATTRIBS['fill_method'] not in node.attrib:
+                    element = self.preselect_fill_method(element)
                 element.order = z
                 nodes_by_class[cls].append(element)
 
         return sorted(list(nodes_by_class.items()), key=lambda cls_nodes: cls_nodes[0].__name__)
+
+    def preselect_fill_method(self, element):
+        # Shapes without a fill method get the one that suits their geometry best.
+        # Cancel discards it, Apply saves it like any other param.
+        try:
+            method, reason = suggest_fill_method(element)
+        except Exception:
+            debug.log(format_uncaught_exception())
+            return element
+        element.set_param('fill_method', method)
+        self.fill_method_suggestions[method].append(reason)
+        # set_param invalidates the element's caches
+        return FillStitch(element.node)
+
+    def fill_method_info(self):
+        if not self.fill_method_suggestions:
+            return None
+        names = {option.id: option.name for option in FillStitch._fill_methods}
+        parts = []
+        for method, reasons in self.fill_method_suggestions.items():
+            if len(reasons) == 1:
+                parts.append(f"{names[method]} ({reasons[0]})")
+            else:
+                parts.append(_("%(method)s for %(count)d objects") % {'method': names[method], 'count': len(reasons)})
+        return _("Fill method preselected from the shape: ") + ", ".join(parts)
 
     def get_values(self, param, nodes):
         if param.type in ('toggle', 'boolean'):
@@ -944,8 +979,9 @@ class Params(InkstitchExtension):
 
             for group, params in self.group_params(params):
                 tab_name = group or cls.element_name
+                info = self.fill_method_info() if cls is FillStitch and not group else None
                 tab = ParamsTab(parent, id=wx.ID_ANY, name=tab_name,
-                                params=list(params), nodes=nodes)
+                                params=list(params), nodes=nodes, info=info)
                 new_tabs.append(tab)
 
                 if group == "":
